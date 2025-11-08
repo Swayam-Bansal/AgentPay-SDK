@@ -282,8 +282,8 @@ class EscrowManager:
         escrow = self._escrows.get(escrow_id)
         
         if escrow is None:
-            # Create dummy escrow for error result
-            dummy = Escrow(from_agent_id="", to_agent_id="", amount=0, escrow_id=escrow_id)
+            # Create dummy escrow for error result (amount=1 to satisfy validation)
+            dummy = Escrow(from_agent_id="", to_agent_id="", amount=1, escrow_id=escrow_id)
             return EscrowResult(
                 success=False,
                 escrow=dummy,
@@ -348,8 +348,8 @@ class EscrowManager:
         escrow = self._escrows.get(escrow_id)
         
         if escrow is None:
-            # Create dummy escrow for error result
-            dummy = Escrow(from_agent_id="", to_agent_id="", amount=0, escrow_id=escrow_id)
+            # Create dummy escrow for error result (amount=1 to satisfy validation)
+            dummy = Escrow(from_agent_id="", to_agent_id="", amount=1, escrow_id=escrow_id)
             return EscrowResult(
                 success=False,
                 escrow=dummy,
