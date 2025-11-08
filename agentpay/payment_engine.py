@@ -98,7 +98,8 @@ class PaymentEngine:
         """
         self.agent_registry = agent_registry
         self.ledger_manager = ledger_manager
-        self._processed_intents: Dict[str, PaymentIntent] = {}  # For idempotency
+        self._processed_intents: Dict[str, PaymentIntent] = {}  # For idempotency (keyed by idempotency_key)
+        self._all_intents: Dict[str, PaymentIntent] = {}  # All processed intents (keyed by intent_id)
     
     def execute_payment(self, payment_intent: PaymentIntent) -> PaymentResult:
         """Execute a payment with full validation and error handling.
@@ -201,6 +202,9 @@ class PaymentEngine:
             if payment_intent.idempotency_key:
                 self._processed_intents[payment_intent.idempotency_key] = payment_intent
             
+            # Also store by intent_id for status lookups
+            self._all_intents[payment_intent.intent_id] = payment_intent
+            
             return PaymentResult(
                 success=True,
                 payment_intent=payment_intent
@@ -272,11 +276,8 @@ class PaymentEngine:
             This only finds intents that have been processed through this engine.
             For a complete view, check the ledger entries.
         """
-        # Search through processed intents by idempotency key
-        for intent in self._processed_intents.values():
-            if intent.intent_id == intent_id:
-                return intent
-        return None
+        # Look up by intent_id
+        return self._all_intents.get(intent_id)
     
     def clear_idempotency_cache(self) -> None:
         """Clear the idempotency cache.
@@ -286,3 +287,4 @@ class PaymentEngine:
             persist (e.g., in a database) to handle restarts.
         """
         self._processed_intents.clear()
+        self._all_intents.clear()
