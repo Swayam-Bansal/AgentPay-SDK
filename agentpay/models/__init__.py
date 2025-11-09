@@ -4,7 +4,7 @@ from agentpay.models.wallet import Wallet
 from agentpay.models.policy import Policy
 from agentpay.models.agent import Agent
 from agentpay.models.payment import PaymentIntent, PaymentStatus
-from agentpay.models.ledger import LedgerEntry, EntryType
+from agentpay.models.ledger import LedgerEntry, EntryType, TransactionType
 
 __all__ = [
     "Wallet",
@@ -14,4 +14,5 @@ __all__ = [
     "PaymentStatus",
     "LedgerEntry",
     "EntryType",
+    "TransactionType",
 ]

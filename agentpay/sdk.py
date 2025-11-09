@@ -611,6 +611,313 @@ class AgentPaySDK:
         """
         return self.ledger.get_entries_by_reference(reference_id)
     
+    # ========== Agent-to-Agent Transfers & Earnings ==========
+    
+    def transfer_to_agent(
+        self,
+        from_agent_id: str,
+        to_agent_id: str,
+        amount: int,
+        purpose: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Transfer funds from one agent to another (agent earns money).
+        
+        This is used for agent-to-agent service payments where one agent
+        pays another for work completed. The receiving agent earns income.
+        
+        Args:
+            from_agent_id: Paying agent's ID (the one spending)
+            to_agent_id: Receiving agent's ID (the earner)
+            amount: Amount in cents to transfer
+            purpose: Reason for payment
+            metadata: Additional context
+        
+        Returns:
+            Dict with:
+                - transaction_id: str
+                - from_agent: str
+                - to_agent: str
+                - amount: int
+                - status: str ("completed" or "failed")
+                - timestamp: str
+                - purpose: str
+                - error: Optional[str] (if failed)
+        
+        Raises:
+            ValueError: If agents don't exist or validation fails
+        
+        Example:
+            ```python
+            # Agent A pays Agent B for data analysis service
+            result = sdk.transfer_to_agent(
+                from_agent_id="agent-a",
+                to_agent_id="agent-b",
+                amount=5000,  # $50
+                purpose="Data analysis service payment"
+            )
+            
+            if result['status'] == 'completed':
+                print(f"Payment successful: {result['transaction_id']}")
+            else:
+                print(f"Payment failed: {result['error']}")
+            ```
+        """
+        from datetime import datetime, UTC
+        
+        if self.mode == 'remote':
+            raise NotImplementedError(
+                "transfer_to_agent() is only available in local mode currently"
+            )
+        
+        transaction_id = f"transfer-{uuid4()}"
+        
+        try:
+            # Use the existing payment engine which now tracks earnings
+            result = self.pay(
+                from_agent=from_agent_id,
+                to_agent=to_agent_id,
+                amount=amount,
+                memo=purpose,
+                metadata=metadata
+            )
+            
+            if result.success:
+                return {
+                    'transaction_id': transaction_id,
+                    'from_agent': from_agent_id,
+                    'to_agent': to_agent_id,
+                    'amount': amount,
+                    'status': 'completed',
+                    'timestamp': datetime.now(UTC).isoformat(),
+                    'purpose': purpose
+                }
+            else:
+                return {
+                    'transaction_id': transaction_id,
+                    'from_agent': from_agent_id,
+                    'to_agent': to_agent_id,
+                    'amount': amount,
+                    'status': 'failed',
+                    'timestamp': datetime.now(UTC).isoformat(),
+                    'purpose': purpose,
+                    'error': result.error_message
+                }
+        except Exception as e:
+            return {
+                'transaction_id': transaction_id,
+                'from_agent': from_agent_id,
+                'to_agent': to_agent_id,
+                'amount': amount,
+                'status': 'failed',
+                'timestamp': datetime.now(UTC).isoformat(),
+                'purpose': purpose,
+                'error': str(e)
+            }
+    
+    def get_agent_earnings(
+        self,
+        agent_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get all income transactions for an agent (money they've earned).
+        
+        Args:
+            agent_id: Agent ID to query
+            start_date: Optional ISO format date to filter from
+            end_date: Optional ISO format date to filter to
+        
+        Returns:
+            Dict with:
+                - agent_id: str
+                - total_earned: int (lifetime earnings in cents)
+                - transaction_count: int
+                - transactions: List of income transactions
+        
+        Example:
+            ```python
+            earnings = sdk.get_agent_earnings("agent-b")
+            print(f"Total earned: ${earnings['total_earned'] / 100}")
+            print(f"Transactions: {earnings['transaction_count']}")
+            
+            for txn in earnings['transactions']:
+                print(f"  ${txn['amount'] / 100} from {txn['from_agent']}")
+                print(f"  Purpose: {txn['purpose']}")
+            ```
+        """
+        if self.mode == 'remote':
+            raise NotImplementedError(
+                "get_agent_earnings() is only available in local mode currently"
+            )
+        
+        from agentpay.models import TransactionType
+        from datetime import datetime
+        
+        agent = self.get_agent(agent_id)
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found")
+        
+        # Get all ledger entries for this agent
+        all_entries = self.get_transaction_history(agent_id)
+        
+        # Filter to only income transactions
+        income_entries = [
+            e for e in all_entries 
+            if e.transaction_type == TransactionType.INCOME
+        ]
+        
+        # Apply date filters if provided
+        if start_date:
+            start = datetime.fromisoformat(start_date)
+            income_entries = [e for e in income_entries if e.created_at >= start]
+        
+        if end_date:
+            end = datetime.fromisoformat(end_date)
+            income_entries = [e for e in income_entries if e.created_at <= end]
+        
+        # Format transactions
+        transactions = []
+        for entry in income_entries:
+            transactions.append({
+                'transaction_id': entry.reference_id,
+                'from_agent': entry.counterparty_id,
+                'amount': entry.delta_amount,
+                'purpose': entry.memo or "Payment received",
+                'timestamp': entry.created_at.isoformat(),
+                'balance_after': entry.balance_after
+            })
+        
+        return {
+            'agent_id': agent_id,
+            'total_earned': agent.total_earned,
+            'transaction_count': len(transactions),
+            'transactions': transactions
+        }
+    
+    def get_agent_expenses(
+        self,
+        agent_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get all expense transactions for an agent (money they've spent).
+        
+        Args:
+            agent_id: Agent ID to query
+            start_date: Optional ISO format date to filter from
+            end_date: Optional ISO format date to filter to
+        
+        Returns:
+            Dict with:
+                - agent_id: str
+                - total_spent: int (lifetime spending in cents)
+                - transaction_count: int
+                - transactions: List of expense transactions
+        
+        Example:
+            ```python
+            expenses = sdk.get_agent_expenses("agent-a")
+            print(f"Total spent: ${expenses['total_spent'] / 100}")
+            
+            for txn in expenses['transactions']:
+                print(f"  ${abs(txn['amount']) / 100} to {txn['to_agent']}")
+                print(f"  Purpose: {txn['purpose']}")
+            ```
+        """
+        if self.mode == 'remote':
+            raise NotImplementedError(
+                "get_agent_expenses() is only available in local mode currently"
+            )
+        
+        from agentpay.models import TransactionType
+        from datetime import datetime
+        
+        agent = self.get_agent(agent_id)
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found")
+        
+        # Get all ledger entries for this agent
+        all_entries = self.get_transaction_history(agent_id)
+        
+        # Filter to only expense transactions
+        expense_entries = [
+            e for e in all_entries 
+            if e.transaction_type == TransactionType.EXPENSE
+        ]
+        
+        # Apply date filters if provided
+        if start_date:
+            start = datetime.fromisoformat(start_date)
+            expense_entries = [e for e in expense_entries if e.created_at >= start]
+        
+        if end_date:
+            end = datetime.fromisoformat(end_date)
+            expense_entries = [e for e in expense_entries if e.created_at <= end]
+        
+        # Format transactions
+        transactions = []
+        for entry in expense_entries:
+            transactions.append({
+                'transaction_id': entry.reference_id,
+                'to_agent': entry.counterparty_id,
+                'amount': entry.delta_amount,  # Will be negative
+                'purpose': entry.memo or "Payment made",
+                'timestamp': entry.created_at.isoformat(),
+                'balance_after': entry.balance_after
+            })
+        
+        return {
+            'agent_id': agent_id,
+            'total_spent': agent.total_spent,
+            'transaction_count': len(transactions),
+            'transactions': transactions
+        }
+    
+    def get_agent_balance_summary(self, agent_id: str) -> Dict[str, Any]:
+        """Get current balance and earning/spending summary for an agent.
+        
+        Args:
+            agent_id: Agent ID to query
+        
+        Returns:
+            Dict with:
+                - agent_id: str
+                - current_balance: int (available balance)
+                - total_earned: int (lifetime earnings)
+                - total_spent: int (lifetime spending)
+                - net_profit: int (earned - spent)
+                - hold: int (funds in escrow)
+                - total_wallet: int (balance + hold)
+        
+        Example:
+            ```python
+            summary = sdk.get_agent_balance_summary("agent-b")
+            print(f"Balance: ${summary['current_balance'] / 100}")
+            print(f"Total Earned: ${summary['total_earned'] / 100}")
+            print(f"Total Spent: ${summary['total_spent'] / 100}")
+            print(f"Net Profit: ${summary['net_profit'] / 100}")
+            ```
+        """
+        if self.mode == 'remote':
+            raise NotImplementedError(
+                "get_agent_balance_summary() is only available in local mode currently"
+            )
+        
+        agent = self.get_agent(agent_id)
+        if not agent:
+            raise ValueError(f"Agent {agent_id} not found")
+        
+        return {
+            'agent_id': agent_id,
+            'current_balance': agent.wallet.balance,
+            'total_earned': agent.total_earned,
+            'total_spent': agent.total_spent,
+            'net_profit': agent.net_profit,
+            'hold': agent.wallet.hold,
+            'total_wallet': agent.wallet.total
+        }
+    
     # ========== Utility Methods ==========
     
     def clear_all(self) -> None:

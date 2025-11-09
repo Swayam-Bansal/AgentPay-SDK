@@ -11,6 +11,21 @@ from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
+class TransactionType(str, Enum):
+    """Types of transactions for agent ledger categorization.
+    
+    This enum categorizes transactions from the agent's perspective:
+    - EXPENSE: Money spent by the agent
+    - INCOME: Money received by the agent
+    - REFUND: Money returned to the agent
+    - FEE: Platform fees charged to the agent
+    """
+    EXPENSE = "expense"
+    INCOME = "income"
+    REFUND = "refund"
+    FEE = "fee"
+
+
 class EntryType(str, Enum):
     """Types of ledger entries representing different value movement operations.
     
@@ -172,6 +187,14 @@ class LedgerEntry(BaseModel):
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="Entry timestamp"
+    )
+    transaction_type: Optional[TransactionType] = Field(
+        default=None,
+        description="Transaction categorization from agent's perspective (expense/income/refund/fee)"
+    )
+    counterparty_id: Optional[str] = Field(
+        default=None,
+        description="ID of the other agent involved in this transaction (for transfers)"
     )
     
     @property

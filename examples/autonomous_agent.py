@@ -2,7 +2,33 @@
 Autonomous Agent Example - Dedalus-Style
 Demonstrates an AI agent that can autonomously request payments,
 get approval via quorum consensus, and make purchases.
+
+Also demonstrates agent-to-agent service payments and earnings tracking.
 """
+import os
+import sys
+import time
+from typing import Dict, Optional
+
+# Add parent directory to path to import agentpay
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Try to load .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv not installed, try to manually load .env
+    env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key] = value
+
+from agentpay import AgentPaySDK
 
 import os
 import sys
