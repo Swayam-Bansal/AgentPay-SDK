@@ -12,6 +12,7 @@ from agentpay.agent_registry import AgentRegistry
 from agentpay.ledger_manager import LedgerManager
 from agentpay.payment_engine import PaymentEngine, PaymentResult
 from agentpay.escrow_manager import EscrowManager, Escrow, EscrowResult, EscrowStatus
+from agentpay.http_client import HTTPClient
 
 
 class AgentPaySDK:
@@ -29,16 +30,22 @@ class AgentPaySDK:
     
     Usage Example:
         ```python
-        # Initialize SDK
+        # Local Mode (in-memory, for testing)
         sdk = AgentPaySDK()
-        
+
+        # Remote Mode (connected to backend API)
+        sdk = AgentPaySDK(
+            api_key="sk_test_abc123...",
+            base_url="http://localhost:5001"
+        )
+
         # Register agents
         alice = sdk.register_agent("alice", metadata={"name": "Alice"})
         bob = sdk.register_agent("bob", metadata={"name": "Bob"})
-        
+
         # Fund Alice
         sdk.fund_agent("alice", 10000)  # $100.00 in cents
-        
+
         # Make a payment
         result = sdk.pay(
             from_agent="alice",
@@ -46,10 +53,10 @@ class AgentPaySDK:
             amount=5000,
             memo="Payment for services"
         )
-        
+
         if result.success:
             print(f"Payment complete! Bob received ${result.payment_intent.amount / 100}")
-        
+
         # Create an escrow
         escrow_result = sdk.create_escrow(
             from_agent="alice",
@@ -57,38 +64,76 @@ class AgentPaySDK:
             amount=3000,
             memo="Milestone payment"
         )
-        
+
         # Later, release the escrow
         if escrow_result.success:
             sdk.release_escrow(escrow_result.escrow.escrow_id)
-        
+
         # Check balances
         alice_balance = sdk.get_balance("alice")
         print(f"Alice balance: ${alice_balance / 100}")
-        
+
         # View transaction history
         history = sdk.get_transaction_history("alice")
         for entry in history:
             print(f"{entry.entry_type}: {entry.delta_amount}")
         ```
-    
+
     Attributes:
-        registry (AgentRegistry): Internal agent registry
-        ledger (LedgerManager): Internal ledger manager
-        payment_engine (PaymentEngine): Payment execution engine
-        escrow_manager (EscrowManager): Escrow management
+        mode (str): 'local' or 'remote' - determines if using in-memory or API backend
+        http_client (HTTPClient): HTTP client for remote API calls (remote mode only)
+        registry (AgentRegistry): Internal agent registry (local mode only)
+        ledger (LedgerManager): Internal ledger manager (local mode only)
+        payment_engine (PaymentEngine): Payment execution engine (local mode only)
+        escrow_manager (EscrowManager): Escrow management (local mode only)
     """
-    
-    def __init__(self):
-        """Initialize the AgentPay SDK with default configuration.
-        
-        Creates all internal components (registry, ledger, payment engine, escrow manager)
-        and wires them together.
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: str = "http://localhost:5001"
+    ):
+        """Initialize the AgentPay SDK.
+
+        Args:
+            api_key: API key for authentication. If provided, SDK runs in remote mode.
+                    If None, SDK runs in local (in-memory) mode for testing.
+            base_url: Base URL of the AgentPay API (only used in remote mode)
+
+        Examples:
+            # Local mode (for testing)
+            sdk = AgentPaySDK()
+
+            # Remote mode (production)
+            sdk = AgentPaySDK(api_key="sk_test_abc123...")
         """
-        self.registry = AgentRegistry()
-        self.ledger = LedgerManager(self.registry)
-        self.payment_engine = PaymentEngine(self.registry, self.ledger)
-        self.escrow_manager = EscrowManager(self.registry, self.ledger)
+        if api_key:
+            # Remote mode - connect to backend API
+            self.mode = 'remote'
+            self.http_client = HTTPClient(api_key, base_url)
+
+            # Test connection
+            try:
+                ping_result = self.http_client.ping()
+                print(f"✓ Connected to AgentPay API as {ping_result.get('authenticated_as', {}).get('key_name', 'unknown')}")
+            except Exception as e:
+                raise ConnectionError(f"Failed to connect to AgentPay API: {e}")
+
+            # Remote mode doesn't use local components
+            self.registry = None
+            self.ledger = None
+            self.payment_engine = None
+            self.escrow_manager = None
+        else:
+            # Local mode - in-memory operations
+            self.mode = 'local'
+            self.http_client = None
+
+            # Create all internal components
+            self.registry = AgentRegistry()
+            self.ledger = LedgerManager(self.registry)
+            self.payment_engine = PaymentEngine(self.registry, self.ledger)
+            self.escrow_manager = EscrowManager(self.registry, self.ledger)
     
     # ========== Agent Management ==========
     
@@ -575,7 +620,198 @@ class AgentPaySDK:
             This is for testing only. Removes all agents, ledger entries,
             payments, and escrows.
         """
+        if self.mode == 'remote':
+            raise NotImplementedError("clear_all() is not supported in remote mode")
+        
         self.registry.clear()
         self.ledger.clear()
         self.payment_engine.clear_idempotency_cache()
         self.escrow_manager.clear()
+
+    # ========== Virtual Card Methods (Remote Mode Only) ==========
+
+    def request_payment_card(
+        self,
+        amount: int,
+        purpose: str,
+        justification: str,
+        agent_id: str = "sdk-agent",
+        expected_roi: Optional[str] = None,
+        urgency: str = "Medium",
+        budget_remaining: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Request a one-time virtual card with quorum approval.
+        
+        This triggers the full approval workflow:
+        1. Submit payment request
+        2. 5-agent quorum votes on approval
+        3. If approved: virtual card generated (5-minute expiry)
+        4. If denied: rejection with reasoning
+        
+        Args:
+            amount: Card limit (in cents, e.g., 10000 = $100)
+            purpose: What the card is for (e.g., "OpenAI API Credits")
+            justification: Detailed explanation for the request
+            agent_id: ID of requesting agent (default: "sdk-agent")
+            expected_roi: Expected return on investment
+            urgency: "Low", "Medium", or "High"
+            budget_remaining: Optional budget context
+        
+        Returns:
+            Dict with:
+                - approved: bool
+                - card: Dict with card details (if approved)
+                - denial_reason: str (if denied)
+                - consensus_result: Dict with voting details
+                - transaction_id: str
+        
+        Raises:
+            NotImplementedError: If called in local mode
+            ConnectionError: If API request fails
+        
+        Example:
+            ```python
+            sdk = AgentPaySDK(api_key="sk_test_abc...")
+            
+            result = sdk.request_payment_card(
+                amount=10000,  # $100
+                purpose="OpenAI API Credits",
+                justification="Need GPT-4 for Q4 ad campaign",
+                expected_roi="$5K revenue from improved ads",
+                urgency="High"
+            )
+            
+            if result['approved']:
+                card = result['card']
+                print(f"💳 Card: {card['card_number']}")
+                print(f"   CVV: {card['cvv']}")
+                print(f"   Expires: {card['expires_at']}")
+            else:
+                print(f"❌ Denied: {result['denial_reason']}")
+            ```
+        """
+        if self.mode != 'remote':
+            raise NotImplementedError(
+                "request_payment_card() is only available in remote mode. "
+                "Initialize SDK with api_key to use this feature."
+            )
+        
+        return self.http_client.request_payment_card(
+            amount=amount,
+            purpose=purpose,
+            justification=justification,
+            agent_id=agent_id,
+            expected_roi=expected_roi,
+            urgency=urgency,
+            budget_remaining=budget_remaining
+        )
+    
+    def get_card_details(self, card_id: str) -> Dict[str, Any]:
+        """Get details of a virtual card.
+        
+        Args:
+            card_id: ID of the card
+        
+        Returns:
+            Dict with complete card details
+        
+        Raises:
+            NotImplementedError: If called in local mode
+        
+        Example:
+            ```python
+            card = sdk.get_card_details("card-123")
+            print(f"Status: {card['status']}")
+            print(f"Limit: ${card['amount_limit'] / 100}")
+            ```
+        """
+        if self.mode != 'remote':
+            raise NotImplementedError(
+                "get_card_details() is only available in remote mode"
+            )
+        
+        return self.http_client.get_card_details(card_id)
+    
+    def cancel_card(self, card_id: str) -> bool:
+        """Cancel a virtual card.
+        
+        Args:
+            card_id: ID of the card to cancel
+        
+        Returns:
+            True if successful
+        
+        Raises:
+            NotImplementedError: If called in local mode
+        
+        Example:
+            ```python
+            success = sdk.cancel_card("card-123")
+            if success:
+                print("Card cancelled")
+            ```
+        """
+        if self.mode != 'remote':
+            raise NotImplementedError(
+                "cancel_card() is only available in remote mode"
+            )
+        
+        return self.http_client.cancel_card(card_id)
+    
+    def charge_card(
+        self,
+        card_number: str,
+        cvv: str,
+        expiry_date: str,
+        amount: int,
+        merchant_name: str
+    ) -> Dict[str, Any]:
+        """Charge a virtual card at a mock merchant.
+        
+        This simulates making a purchase with the virtual card.
+        The card will be marked as "used" after a successful charge.
+        
+        Args:
+            card_number: 16-digit card number
+            cvv: 3-digit CVV
+            expiry_date: Expiry in MM/YY format
+            amount: Amount to charge (in cents)
+            merchant_name: Name of merchant (e.g., "OpenAI API Credits")
+        
+        Returns:
+            Dict with:
+                - success: bool
+                - transaction_id: str (if successful)
+                - error: str (if failed)
+        
+        Raises:
+            NotImplementedError: If called in local mode
+        
+        Example:
+            ```python
+            result = sdk.charge_card(
+                card_number="4242424242424242",
+                cvv="123",
+                expiry_date="12/25",
+                amount=10000,
+                merchant_name="OpenAI API Credits"
+            )
+            
+            if result['success']:
+                print(f"✓ Charge successful: {result['transaction_id']}")
+            else:
+                print(f"✗ Charge failed: {result['error']}")
+            ```
+        """
+        if self.mode != 'remote':
+            raise NotImplementedError(
+                "charge_card() is only available in remote mode"
+            )
+        
+        return self.http_client.charge_card(
+            card_number=card_number,
+            cvv=cvv,
+            expiry_date=expiry_date,
+            amount=amount,
+            merchant_name=merchant_name
+        )
