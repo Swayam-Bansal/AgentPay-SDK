@@ -81,6 +81,16 @@ class Agent(BaseModel):
         default_factory=dict,
         description="Optional metadata (name, role, etc.)"
     )
+    total_earned: int = Field(
+        default=0,
+        ge=0,
+        description="Lifetime total amount earned by this agent (income)"
+    )
+    total_spent: int = Field(
+        default=0,
+        ge=0,
+        description="Lifetime total amount spent by this agent (expenses)"
+    )
     
     @property
     def display_name(self) -> str:
@@ -102,6 +112,23 @@ class Agent(BaseModel):
             ```
         """
         return self.metadata.get("name", self.agent_id)
+    
+    @property
+    def net_profit(self) -> int:
+        """Calculate net profit (earnings minus spending).
+        
+        Returns:
+            int: total_earned - total_spent
+            
+        Example:
+            ```python
+            agent = Agent()
+            agent.total_earned = 50000  # $500
+            agent.total_spent = 20000   # $200
+            print(agent.net_profit)     # 30000 ($300)
+            ```
+        """
+        return self.total_earned - self.total_spent
     
     def can_pay(self, amount: int, recipient_id: str) -> tuple[bool, Optional[str]]:
         """Check if this agent can make a payment to another agent.

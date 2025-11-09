@@ -12,7 +12,7 @@ delta_amounts equals zero (value is conserved).
 """
 
 from typing import List, Dict, Optional
-from agentpay.models import LedgerEntry, EntryType, Agent
+from agentpay.models import LedgerEntry, EntryType, TransactionType, Agent
 from agentpay.agent_registry import AgentRegistry
 
 
@@ -190,6 +190,10 @@ class LedgerManager:
         from_agent.wallet.balance -= amount
         to_agent.wallet.balance += amount
         
+        # Update lifetime earnings/spending
+        from_agent.total_spent += amount
+        to_agent.total_earned += amount
+        
         # Create ledger entries
         debit_entry = LedgerEntry(
             agent_id=from_agent_id,
@@ -197,7 +201,9 @@ class LedgerManager:
             entry_type=EntryType.PAYMENT,
             reference_id=reference_id,
             balance_after=from_agent.wallet.balance,
-            memo=memo
+            memo=memo,
+            transaction_type=TransactionType.EXPENSE,
+            counterparty_id=to_agent_id
         )
         
         credit_entry = LedgerEntry(
@@ -206,7 +212,9 @@ class LedgerManager:
             entry_type=EntryType.PAYMENT,
             reference_id=reference_id,
             balance_after=to_agent.wallet.balance,
-            memo=memo
+            memo=memo,
+            transaction_type=TransactionType.INCOME,
+            counterparty_id=from_agent_id
         )
         
         self._entries.extend([debit_entry, credit_entry])
@@ -326,6 +334,10 @@ class LedgerManager:
         from_agent.wallet.hold -= amount
         to_agent.wallet.balance += amount
         
+        # Update lifetime earnings/spending
+        from_agent.total_spent += amount
+        to_agent.total_earned += amount
+        
         # Payer entry (hold decrease, but balance unchanged)
         payer_entry = LedgerEntry(
             agent_id=from_agent_id,
@@ -333,7 +345,9 @@ class LedgerManager:
             entry_type=EntryType.ESCROW_RELEASE,
             reference_id=reference_id,
             balance_after=from_agent.wallet.balance,  # Balance unchanged
-            memo=memo
+            memo=memo,
+            transaction_type=TransactionType.EXPENSE,
+            counterparty_id=to_agent_id
         )
         
         payee_entry = LedgerEntry(
@@ -342,7 +356,9 @@ class LedgerManager:
             entry_type=EntryType.ESCROW_RELEASE,
             reference_id=reference_id,
             balance_after=to_agent.wallet.balance,
-            memo=memo
+            memo=memo,
+            transaction_type=TransactionType.INCOME,
+            counterparty_id=from_agent_id
         )
         
         self._entries.extend([payer_entry, payee_entry])
