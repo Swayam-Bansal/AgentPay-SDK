@@ -1,294 +1,199 @@
-## AgentPay SDK – High-Level Description for the Coding Agent
+# AgentPay SDK
 
-We are building a standalone repository called **`agentpay-sdk`**.
+A lightweight, rail-agnostic SDK that lets any AI agent send, receive, hold (escrow), and track value safely under configurable policies — with a single, simple API.
 
-This repo is **not** the UI or the governance system.
-It is a **payment brain and ledger for agents** that any project can import and use.
+## Why AgentPay?
 
-At a high level, this SDK must provide:
+- **Make agents financially useful.** Give autonomous agents the ability to pay and get paid under guardrails you control.
+- **Safety-first.** Per-agent policies (allowlists, limits, pause) and a double-entry ledger prevent mistakes and enable audits.
+- **Rail-agnostic.** Start with internal “credits” for testing. Plug external rails (Stripe/AP2/etc.) later via adapters.
 
-1. An **abstract payment model** (agents, wallets, policies, payment intents, transfers, escrow, streams).
-2. A **built-in internal ledger** using a “credits” currency as the **default rail**.
-3. A **rail adapter interface** to integrate external payment rails in the future (Stripe, AP2-style systems, Agent Pay, etc.).
-4. A **high-level Agent API** so callers can say things like “pay this agent”, “lock funds in escrow”, “start a streaming payment” without worrying about how it’s implemented.
-5. An **optional HTTP layer** (small REST API) so non-Python / non-TS projects can still talk to the SDK over HTTP.
+## What you can build with it
 
-Below is what each piece means in detail.
+- **Agent-to-agent payments** with policy enforcement and idempotency.
+- **Escrows** to lock funds and release or cancel later.
+- **Wallet/ledger visibility** for balances and transaction history.
+- A **single Python API** you can call from your agent loops or services.
 
----
+## Install
 
-## 1. Abstract Payment Model
+```bash
+pip install -e .
+```
 
-The SDK defines the **core objects and rules** of agent-to-agent payments. It should *not* be tied to any specific LLM, UI, or product.
+Requires Python 3.10+.
 
-Core concepts:
+## Quickstart (Local, in-memory)
 
-1. **Agent**
+```python
+from agentpay.sdk import AgentPaySDK
+from agentpay.models import Policy
 
-   * Logical identity that can **own money** and **sign payment intents**.
-   * Each agent has:
+# Create SDK in local mode (in-memory)
+sdk = AgentPaySDK()
 
-     * A unique ID.
-     * A wallet.
-     * A policy controlling how it can spend.
-     * Optional metadata (e.g., display name, role, external references).
+# Register agents
+sdk.register_agent("alice", metadata={"name": "Alice"})
+sdk.register_agent("bob", metadata={"name": "Bob"})
 
-2. **Wallet**
+# Fund Alice with 100.00 credits (cents)
+sdk.fund_agent("alice", 10_000, memo="Initial funding")
 
-   * Every agent has exactly one wallet in the internal system.
-   * Holds:
+# Optional: set guardrails for Alice
+sdk.update_agent_policy("alice", Policy(max_per_transaction=6_000))
 
-     * `balance` (available credits).
-     * `hold` (credits reserved for escrow, pending payouts, etc.).
-   * All amounts are represented as **integers in smallest unit (e.g., cents)**, never as floats.
+# Pay Bob 50.00
+result = sdk.pay(from_agent="alice", to_agent="bob", amount=5_000, memo="Consulting")
+assert result.success, result.error_message
 
-3. **Policy**
-   Per-agent rules that restrict how the agent can spend. Examples:
+# Check balances
+print("Alice:", sdk.get_balance("alice"))  # 5000
+print("Bob:",   sdk.get_balance("bob"))    # 5000
 
-   * `max_per_transaction` (upper bound on a single payment).
-   * `daily_spend_cap` (max total outgoing spend per UTC day).
-   * `require_human_approval_over_x` (threshold beyond which a human must approve).
-   * `allowlist` (which agents this agent is allowed to pay).
-   * `paused` (global kill-switch: if true, this agent cannot spend).
+# View Alice’s transaction history
+for entry in sdk.get_transaction_history("alice"):
+    print(entry.entry_type, entry.delta_amount, entry.balance_after)
+```
 
-4. **PaymentIntent**
+## Core concepts (2-minute read)
 
-   * A **request** to move value from one agent to another.
-   * Contains:
+- **Agent**: Logical identity that owns funds and can pay others. Holds a `Wallet` and `Policy`.
+- **Wallet**: Two buckets — `balance` (available) and `hold` (reserved for escrow). Amounts are integers (smallest unit, e.g., cents).
+- **Policy**: Guardrails per agent. Examples: `paused`, `allowlist`, `max_per_transaction`, `daily_spend_cap` (planned), `require_human_approval_over` (planned flow).
+- **PaymentIntent**: A request to move value. The engine validates policies and funds and records double-entry ledger entries.
+- **LedgerEntry**: Immutable audit trail. Every movement is recorded and reconciles to zero (except top-ups/withdrawals).
+- **Escrow**: Lock funds now, release to recipient later or cancel back to payer.
 
-     * `from_agent`, `to_agent`
-     * `amount`
-     * `status` (e.g., `REQUIRES_CONFIRMATION`, `COMPLETED`, `FAILED_POLICY`, `FAILED_FUNDS`, `CANCELLED`)
-     * Optional memo / metadata.
-     * An idempotency key and (optionally) a cryptographic signature.
-   * Confirming a PaymentIntent must:
+## Common tasks and examples
 
-     * Enforce policies.
-     * Ensure sufficient funds.
-     * Update the ledger and wallets atomically.
+### 1) Agent management
 
-5. **Transfer / LedgerEntry**
+```python
+from agentpay.sdk import AgentPaySDK
+sdk = AgentPaySDK()
 
-   * Every movement of value is represented in a **double-entry ledger**.
-   * Each transaction is recorded as at least **two ledger entries**:
+sdk.register_agent("agent-1", metadata={"name": "Builder"})
+agent = sdk.get_agent("agent-1")
+print(agent.display_name)
 
-     * One negative (debit) from payer.
-     * One positive (credit) to payee.
-   * Ledger entries include:
+# Pause/unpause spending
+sdk.pause_agent("agent-1")
+sdk.unpause_agent("agent-1")
+```
 
-     * `agent_id`
-     * `delta_amount` (positive or negative)
-     * Type (`PAYMENT`, `ESCROW_LOCK`, `ESCROW_RELEASE`, `STREAM_TICK`, `TOP_UP`, etc.)
-     * Reference (which PaymentIntent / Escrow / Stream they belong to)
-     * `balance_after` for that agent.
+### 2) Funding wallets (top-ups)
 
-6. **Escrow**
+```python
+entry = sdk.fund_agent("agent-1", 25_000, memo="Seed credits")
+print(entry.balance_after)
+```
 
-   * A mechanism where payer locks funds that can later be released or cancelled.
-   * When created:
+### 3) Payments with policies and idempotency
 
-     * Funds move from payer’s `balance` into payer’s `hold`.
-   * When released:
+```python
+from agentpay.models import Policy
 
-     * Funds move from payer’s `hold` into payee’s `balance`.
-   * When cancelled:
+# Only allow payments to a specific recipient, limit per-tx to 100.00
+sdk.update_agent_policy("agent-1", Policy(
+    allowlist={"agent-2"},
+    max_per_transaction=10_000,
+))
 
-     * Funds move from payer’s `hold` back to payer’s `balance`.
+# Idempotent payment (safe to retry with the same key)
+res = sdk.pay(
+    from_agent="agent-1",
+    to_agent="agent-2",
+    amount=9_500,
+    idempotency_key="pay-2025-001",
+    memo="Monthly access"
+)
+if not res.success:
+    print(res.error_code, res.error_message)
+```
 
-7. **Stream (Streaming Payment)**
+### 4) Escrow lifecycle
 
-   * Represents a payment over time, usually at a fixed rate (e.g., X cents per minute).
-   * Has:
+```python
+# Create escrow (moves payer balance -> hold)
+escrow = sdk.create_escrow(from_agent="agent-1", to_agent="agent-2", amount=3_000)
+assert escrow.success
+escrow_id = escrow.escrow.escrow_id
 
-     * `from_agent`, `to_agent`
-     * `rate_per_interval` (e.g., per minute)
-     * `cap` (max total to pay)
-     * `spent` (how much has been paid so far)
-     * `status` (`ACTIVE`, `STOPPED`).
-   * The SDK supports **ticks**: discrete chunks of payment calculated from elapsed time or units of work, respecting caps and policies.
+# Release (payer hold -> recipient balance)
+rel = sdk.release_escrow(escrow_id)
+assert rel.success
 
-These abstractions must be **rail-agnostic**: they don’t care whether money ultimately comes from Stripe, a bank, or a simulated balance. They only care about internal credits and consistency.
+# Or cancel (payer hold -> payer balance)
+# can = sdk.cancel_escrow(escrow_id)
+```
 
----
+### 5) History and reporting
 
-## 2. Internal Ledger (Default Rail)
+```python
+entries = sdk.get_transaction_history("agent-1")
+for e in entries:
+    print(e.entry_type, e.delta_amount, e.reference_id)
+```
 
-The SDK includes its own **internal rail**. Think of it as a “credits” system:
+## Local vs Remote modes
 
-* This is the **default and guaranteed** implementation for moving value between agents.
-* It is always available, even if no external rails are configured.
-* It is responsible for:
+- **Local mode (default)**: In-memory registry, ledger, payment engine, and escrow manager. Perfect for tests and prototyping.
+- **Remote mode**: If you pass an API key, the SDK uses an `HTTPClient` to talk to a separate AgentPay service (not bundled here). You’ll need that service running with compatible endpoints.
 
-  * Maintaining each agent’s `balance` and `hold`.
-  * Enforcing **double-entry accounting** and invariants:
+```python
+sdk = AgentPaySDK(api_key="sk_test_abc123", base_url="http://localhost:5001")
+# Operations will call the HTTP API via HTTPClient.ping()/get()/post(), etc.
+```
 
-    * No negative balances.
-    * Sum of all deltas across all agents for a given transfer equals **zero** (value conservation).
-  * Handling:
+Note: This repo currently does not ship the FastAPI service; the `HTTPClient` exists for integration with an external deployment.
 
-    * Confirmed payments.
-    * Escrow lock/release/cancel.
-    * Streaming payments (ticks).
-    * Top-ups and adjustments in “credits”.
+## Error codes and safety
 
-This “internal credits” model lets us:
+Typical errors returned by the payment engine:
 
-* Run everything in **test/sandbox mode** without real money.
-* Provide deterministic, reproducible behavior.
-* Let external rails be layered on top later.
+- `AGENT_PAUSED` — spending is paused for the payer.
+- `RECIPIENT_NOT_ALLOWED` — recipient not in payer’s allowlist.
+- `AMOUNT_EXCEEDS_LIMIT` — amount exceeds per-transaction limit.
+- `INSUFFICIENT_FUNDS` — not enough available balance.
+- `PAYER_NOT_FOUND` / `PAYEE_NOT_FOUND` — agent IDs invalid.
 
-The internal ledger is **the source of truth** for the SDK. Even when external rails are used, their results are mirrored here as ledger entries.
+Design notes:
 
----
+- All amounts are integers (e.g., cents). No floats.
+- Double-entry ledger ensures debits equal credits (except top-ups/withdrawals).
+- Idempotency is supported in-memory in local mode.
 
-## 3. Rail Adapter Interface (External Rails)
+## Current status vs roadmap
 
-We want this SDK to be “**infra for all rails**”.
+What’s implemented today:
 
-That means we define a **generic rail adapter interface** that external payment systems can implement. Examples of rails we might plug in:
+- Agent registry and policies: `paused`, `allowlist`, `max_per_transaction` (enforced).
+- Wallets and double-entry ledger: top-ups, payments, escrow lock/release/cancel, history queries.
+- Payment engine: validation, policy enforcement, idempotency cache, clear results.
+- High-level Python SDK: one place to call for all operations.
 
-* Stripe or Stripe Agent Toolkit.
-* AP2-like agent payment protocols.
-* Mastercard Agent Pay.
-* Bank transfer or crypto rails.
+Planned/next:
 
-The rail adapter interface must define *what the SDK expects from any rail*, not how it’s implemented.
+- `daily_spend_cap` enforcement and approval workflow for `require_human_approval_over`.
+- Streaming payments (stream model and ticks).
+- Persistence (DB-backed agents/ledger/escrows/idempotency) with transactions.
+- Optional HTTP service (auth, idempotency headers, pagination, webhooks) in this repo or a sibling.
+- Rail adapter interface and at least one concrete adapter (e.g., Stripe/AP2) in addition to internal credits.
 
-High-level responsibilities of a rail adapter:
+## Testing
 
-1. **Top-ups / Funding**
+```bash
+pytest -q
+```
 
-   * Ability to convert external money into internal credits.
-   * Example operations:
+The suite covers models, SDK flows, payments, and escrow behaviors. Add tests for your policies and integrations as you extend the SDK.
 
-     * Create a top-up request.
-     * Confirm that real funds arrived.
-     * Notify the SDK so it can credit the internal wallet.
+## Contributing
 
-2. **Withdrawals / Cash-out**
+- Open an issue with your use case and proposed changes.
+- Keep APIs minimal and rail-agnostic.
+- Add tests for new behaviors and invariants.
 
-   * Ability to convert internal credits into real money for the agent.
-   * Example operations:
+## License
 
-     * Withdraw a certain amount to a bank/Stripe account.
-     * Record the result in the internal ledger.
-
-3. **Direct Payments (optional, future)**
-
-   * For some rails, we may want to run **real-time payments** directly on them.
-   * Rail adapter would then:
-
-     * Accept a PaymentIntent.
-     * Initiate a real payment via the external rail.
-     * Update our internal ledger when done (success or failure).
-
-4. **Status & Reconciliation (future)**
-
-   * Ability to check the status of external transactions.
-   * Ability to reconcile internal ledger with an external statement.
-
-For the hackathon:
-
-* The **internal credits rail** will be fully implemented.
-* External rails can be represented as **adapter stubs** or simple placeholders with clear comments and future work notes.
-* The key is to show the **interface** and how future adapters would plug in, even if we only use internal credits during the demo.
-
----
-
-## 4. High-Level Agent API (What Callers Use)
-
-The SDK exposes a **simple, high-level API** to applications.
-
-An app using this SDK **does not deal with ledger entries directly**. Instead, it calls semantic operations like:
-
-1. **Agent & Wallet Management**
-
-   * Create/register a new agent and its wallet.
-   * Set or update policy for an agent.
-   * Get current wallet balances (balance + hold).
-   * Fetch recent transactions (ledger entries) for display.
-
-2. **One-off Payments**
-
-   * Create a payment intent between agents.
-   * Confirm (or cancel) the payment intent.
-   * Automatically run policy checks (caps, allowlists, paused).
-   * Return a structured result:
-
-     * Success/failure.
-     * Codes for policy violations, insufficient funds, etc.
-     * IDs and references to ledger entries.
-
-3. **Escrow**
-
-   * Create/lock an escrow (payer → hold).
-   * Release escrow (hold → payee).
-   * Cancel escrow (hold → payer).
-   * Return escrow status and related ledger history.
-
-4. **Streaming Payments**
-
-   * Start a stream with a rate and cap.
-   * Tick the stream (time-based or unit-based).
-   * Stop a stream.
-   * Enforce:
-
-     * Caps.
-     * Policies.
-     * Sufficient funds at each tick.
-
-5. **Top-ups / Test Credits**
-
-   * Methods to add test credits to wallets in sandbox mode.
-   * (In the future) methods to initiate top-ups via external rails.
-
-**Important:**
-The high-level API must handle:
-
-* **Idempotency**: allow the caller to re-send the same request safely using an idempotency key.
-* **Predictable errors**: the SDK should always return clear error codes and messages (e.g., `POLICY_NOT_ALLOWLISTED`, `INSUFFICIENT_FUNDS`, `DAILY_CAP_EXCEEDED`, `AGENT_PAUSED`), so the calling app can display meaningful messages.
-
-This is what other projects will interact with. They shouldn’t need to know how ledger entries are structured internally.
-
----
-
-## 5. Optional HTTP Layer (REST Interface)
-
-In addition to being usable as a code library, `agentpay-sdk` should optionally provide a **thin HTTP API** so that:
-
-* Other languages and services can use it over HTTP.
-* Projects can run AgentPay as a small sidecar or microservice.
-
-This HTTP layer:
-
-* Lives inside the same repo, but is a **thin wrapper** around the SDK’s high-level API.
-* Exposes endpoints for:
-
-  * Agent registration and policy management.
-  * Balance and transaction queries.
-  * Payments, escrows, streams, and test top-ups.
-* Handles:
-
-  * Authentication (e.g., API keys).
-  * Idempotency headers.
-  * Serialization of requests and responses into JSON.
-
-For the hackathon, the HTTP layer can be minimal (enough to demo from other processes or tools), but the design should anticipate:
-
-* Separate deployment.
-* Simple scaling.
-* Compatibility with any client that can make HTTP requests.
-
----
-
-## Summary
-
-So, in short, the `agentpay-sdk` repo is:
-
-* A **core payment engine for agents**, with:
-
-  * A clean abstract model of agents, wallets, policies, payment intents, escrow, and streams.
-  * A robust, rail-agnostic **internal credits ledger** as the default way to move value.
-  * A **rail adapter interface** designed so that in the future, Stripe, AP2, and other systems can plug in seamlessly.
-  * A **high-level Agent API** that apps (like Quorum) can use without thinking about low-level money mechanics.
-  * An **optional HTTP layer** so any language or service can integrate over REST.
+MIT License. See `LICENSE`.
