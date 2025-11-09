@@ -1,4 +1,5 @@
 # AgentPay SDK
+An SDK that lets any AI agent — regardless of model, provider, or platform — safely send, receive, hold, and track value under configurable policies, using a single simple API.
 
 > **Payment infrastructure for AI agents** – internal credits, escrow, policy enforcement, and extensible rail adapters.
 
